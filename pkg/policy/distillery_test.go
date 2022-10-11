@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	stdlog "log"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/identity/cache"
 	"github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/labels/cidr"
 	"github.com/cilium/cilium/pkg/policy/api"
 	"github.com/cilium/cilium/pkg/policy/trafficdirection"
 	"github.com/cilium/cilium/pkg/testutils"
@@ -381,16 +383,16 @@ func (d *policyDistillery) distillPolicy(owner PolicyOwner, epLabels labels.Labe
 		Trace: TRACE_VERBOSE,
 	}
 	ingressL4.Logging = stdlog.New(d.log, "", 0)
-	io.WriteString(d.log, fmt.Sprintf("[distill] Evaluating L4 -> %s", epLabels))
+	io.WriteString(d.log, fmt.Sprintf("[distill] Evaluating L4 Ingress -> %s", epLabels))
 	l4IngressPolicy, err := d.Repository.ResolveL4IngressPolicy(&ingressL4)
 	if err != nil {
 		return nil, err
 	}
 
 	// Handle L4 ingress from each identity in the cache to the endpoint.
-	io.WriteString(d.log, "[distill] Producing L4 filter keys\n")
+	io.WriteString(d.log, "[distill] Producing L4 ingress filter keys\n")
 	for _, l4 := range l4IngressPolicy {
-		io.WriteString(d.log, fmt.Sprintf("[distill] Processing L4Filter (l4: %d/%s), (l3/7: %+v)\n", l4.Port, l4.Protocol, l4.PerSelectorPolicies))
+		io.WriteString(d.log, fmt.Sprintf("[distill] Processing ingress L4Filter (l4: %d/%s), (l3/7: %+v)\n", l4.Port, l4.Protocol, l4.PerSelectorPolicies))
 		for key, entry := range l4.ToMapState(owner, 0) {
 			var policyStr string
 			if entry.IsDeny {
@@ -403,6 +405,36 @@ func (d *policyDistillery) distillPolicy(owner PolicyOwner, epLabels labels.Labe
 		}
 	}
 	l4IngressPolicy.Detach(d.Repository.GetSelectorCache())
+	result.clearOwners()
+
+	// Prepare the L4 policy so we know whether L4 policy may apply
+	egressL4 := SearchContext{
+		From:  epLabels,
+		Trace: TRACE_VERBOSE,
+	}
+	egressL4.Logging = stdlog.New(d.log, "", 0)
+	io.WriteString(d.log, fmt.Sprintf("[distill] Evaluating L4 Engress -> %s", epLabels))
+	l4EgressPolicy, err := d.Repository.ResolveL4EgressPolicy(&egressL4)
+	if err != nil {
+		return nil, err
+	}
+
+	// Handle L4 egress from each identity in the cache to the endpoint.
+	io.WriteString(d.log, "[distill] Producing L4 egress filter keys\n")
+	for _, l4 := range l4EgressPolicy {
+		io.WriteString(d.log, fmt.Sprintf("[distill] Processing egress L4Filter (l4: %d/%s), (l3/7: %+v)\n", l4.Port, l4.Protocol, l4.PerSelectorPolicies))
+		for key, entry := range l4.ToMapState(owner, 1) {
+			var policyStr string
+			if entry.IsDeny {
+				policyStr = "deny"
+			} else {
+				policyStr = "allow"
+			}
+			io.WriteString(d.log, fmt.Sprintf("[distill] L4 egress %s %+v (parser=%s, redirect=%t)\n", policyStr, key, l4.L7Parser, entry.IsRedirectEntry()))
+			result.DenyPreferredInsert(key, entry)
+		}
+	}
+	l4EgressPolicy.Detach(d.Repository.GetSelectorCache())
 	result.clearOwners()
 	return result, nil
 }
@@ -1119,6 +1151,154 @@ func Test_AllowAll(t *testing.T) {
 			if err != nil {
 				t.Errorf("Policy resolution failure: %s", err)
 			}
+			if equal, err := checker.DeepEqual(mapstate, tt.result); !equal {
+				t.Logf("Rules:\n%s\n\n", tt.rules.String())
+				t.Logf("Policy Trace: \n%s\n", logBuffer.String())
+				t.Errorf("Policy obtained didn't match expected for endpoint %s:\n%s", labelsFoo, err)
+			}
+		})
+	}
+}
+
+var (
+	ruleL3L4__DenyWorld = api.NewRule().
+				WithIngressDenyRules([]api.IngressDenyRule{{
+			IngressCommonRule: api.IngressCommonRule{
+				FromEntities: api.EntitySlice{api.EntityWorld},
+			},
+		}}).
+		WithEgressDenyRules([]api.EgressDenyRule{{
+			EgressCommonRule: api.EgressCommonRule{
+				ToEntities: api.EntitySlice{api.EntityWorld},
+			},
+		}}).
+		WithEndpointSelector(api.WildcardEndpointSelector)
+	mapKeyL3L4__WorldIngress = Key{identity.ReservedIdentityWorld.Uint32(), 0, 0, trafficdirection.Ingress.Uint8()}
+	mapKeyL3L4__WorldEgress  = Key{identity.ReservedIdentityWorld.Uint32(), 0, 0, trafficdirection.Egress.Uint8()}
+	mapEntryL3L4__Deny       = MapStateEntry{
+		ProxyPort:        0,
+		DerivedFromRules: labels.LabelArrayList{nil},
+		IsDeny:           true,
+		owners:           map[MapStateOwner]struct{}{},
+	}
+	mapEntryL3L4__Allow = MapStateEntry{
+		ProxyPort:        0,
+		DerivedFromRules: labels.LabelArrayList{nil},
+		owners:           map[MapStateOwner]struct{}{},
+	}
+
+	worldIPIdentity        = identity.NumericIdentity(16324)
+	worldCIDR              = api.CIDR("192.0.2.3/32")
+	lblWorldIP             = labels.ParseSelectLabelArray(fmt.Sprintf("%s:%s", labels.LabelSourceCIDR, worldCIDR))
+	ruleL3L4__AllowWorldIP = api.NewRule().
+				WithIngressRules([]api.IngressRule{{
+			IngressCommonRule: api.IngressCommonRule{
+				FromCIDR: api.CIDRSlice{worldCIDR},
+			},
+		}}).
+		WithEgressRules([]api.EgressRule{{
+			EgressCommonRule: api.EgressCommonRule{
+				ToCIDR: api.CIDRSlice{worldCIDR},
+			},
+		}}).
+		WithEndpointSelector(api.WildcardEndpointSelector)
+
+	worldSubnetIdentity = identity.NumericIdentity(16325)
+	worldSubnet         = api.CIDR("192.0.2.0/24")
+	worldSubnetRule     = api.CIDRRule{
+		Cidr: worldSubnet,
+	}
+	lblWorldSubnet       = cidr.GetCIDRLabels(netip.MustParsePrefix(string(worldSubnet)))
+	ruleL3L4__DenySubnet = api.NewRule().
+				WithIngressDenyRules([]api.IngressDenyRule{{
+			IngressCommonRule: api.IngressCommonRule{
+				FromCIDRSet: api.CIDRRuleSlice{worldSubnetRule},
+			},
+		}}).
+		WithEgressDenyRules([]api.EgressDenyRule{{
+			EgressCommonRule: api.EgressCommonRule{
+				ToCIDRSet: api.CIDRRuleSlice{worldSubnetRule},
+			},
+		}}).
+		WithEndpointSelector(api.WildcardEndpointSelector)
+	mapKeyL3L4__SubnetIngress = Key{worldSubnetIdentity.Uint32(), 0, 0, trafficdirection.Ingress.Uint8()}
+	mapKeyL3L4__SubnetEgress  = Key{worldSubnetIdentity.Uint32(), 0, 0, trafficdirection.Egress.Uint8()}
+
+	ruleL3L4__DenySmallerSubnet = api.NewRule().
+					WithIngressDenyRules([]api.IngressDenyRule{{
+			IngressCommonRule: api.IngressCommonRule{
+				FromCIDRSet: api.CIDRRuleSlice{api.CIDRRule{Cidr: worldCIDR}},
+			},
+		}}).
+		WithEgressDenyRules([]api.EgressDenyRule{{
+			EgressCommonRule: api.EgressCommonRule{
+				ToCIDRSet: api.CIDRRuleSlice{api.CIDRRule{Cidr: worldCIDR}},
+			},
+		}}).
+		WithEndpointSelector(api.WildcardEndpointSelector)
+	ruleL3L4__AllowLargerSubnet = api.NewRule().
+					WithIngressRules([]api.IngressRule{{
+			IngressCommonRule: api.IngressCommonRule{
+				FromCIDRSet: api.CIDRRuleSlice{api.CIDRRule{Cidr: worldSubnet}},
+			},
+		}}).
+		WithEgressRules([]api.EgressRule{{
+			EgressCommonRule: api.EgressCommonRule{
+				ToCIDRSet: api.CIDRRuleSlice{api.CIDRRule{Cidr: worldSubnet}},
+			},
+		}}).
+		WithEndpointSelector(api.WildcardEndpointSelector)
+
+	mapKeyL3L4__SmallerSubnetIngress = Key{worldIPIdentity.Uint32(), 0, 0, trafficdirection.Ingress.Uint8()}
+	mapKeyL3L4__SmallerSubnetEgress  = Key{worldIPIdentity.Uint32(), 0, 0, trafficdirection.Egress.Uint8()}
+)
+
+func Test_EnsureDeniesPrecedeAllows(t *testing.T) {
+	identityCache := cache.IdentityCache{
+		identity.NumericIdentity(identityFoo): labelsFoo,
+		identity.ReservedIdentityWorld:        labels.LabelWorld.LabelArray(),
+		worldIPIdentity:                       lblWorldIP,
+		worldSubnetIdentity:                   lblWorldSubnet.LabelArray(),
+	}
+	selectorCache := testNewSelectorCache(identityCache)
+
+	tests := []struct {
+		test   string
+		rules  api.Rules
+		result MapState
+	}{
+		{"deny_ip_world_denial", api.Rules{ruleL3L4__DenyWorld, ruleL3L4__AllowWorldIP}, MapState{
+			mapKeyL3L4__WorldIngress: mapEntryL3L4__Deny,
+			mapKeyL3L4__WorldEgress:  mapEntryL3L4__Deny,
+		}},
+		{"deny_ip_subnet_denial", api.Rules{ruleL3L4__DenySubnet, ruleL3L4__AllowWorldIP}, MapState{
+			mapKeyL3L4__SubnetIngress: mapEntryL3L4__Deny,
+			mapKeyL3L4__SubnetEgress:  mapEntryL3L4__Deny,
+		}},
+		{"deny_smaller_subnet_with_larger", api.Rules{ruleL3L4__DenySmallerSubnet, ruleL3L4__AllowLargerSubnet}, MapState{
+			mapKeyL3L4__SmallerSubnetIngress: mapEntryL3L4__Deny,
+			mapKeyL3L4__SmallerSubnetEgress:  mapEntryL3L4__Deny,
+			// Is this correct? Or should these not be allowed?
+			mapKeyL3L4__SubnetIngress: mapEntryL3L4__Allow,
+			mapKeyL3L4__SubnetEgress:  mapEntryL3L4__Allow,
+		}},
+	}
+	for _, tt := range tests {
+		repo := newPolicyDistillery(selectorCache)
+		for _, rule := range tt.rules {
+			if rule != nil {
+				_, _ = repo.AddList(api.Rules{rule})
+			}
+		}
+		t.Run(tt.test, func(t *testing.T) {
+			logBuffer := new(bytes.Buffer)
+			repo = repo.WithLogBuffer(logBuffer)
+			mapstate, err := repo.distillPolicy(DummyOwner{}, labelsFoo)
+			if err != nil {
+				t.Errorf("Policy resolution failure: %s", err)
+			}
+			t.Logf("mapstate obtained: %+v", mapstate)
+			t.Logf("mapstate expected: %+v", tt.result)
 			if equal, err := checker.DeepEqual(mapstate, tt.result); !equal {
 				t.Logf("Rules:\n%s\n\n", tt.rules.String())
 				t.Logf("Policy Trace: \n%s\n", logBuffer.String())
