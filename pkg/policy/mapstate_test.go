@@ -730,7 +730,7 @@ func (ds *PolicyTestSuite) TestMapState_DenyPreferredInsert(c *check.C) {
 		},
 	}
 	for _, tt := range tests {
-		tt.keys.DenyPreferredInsert(tt.args.key, tt.args.entry)
+		tt.keys.DenyPreferredInsert(tt.args.key, tt.args.entry, nil)
 		c.Assert(tt.keys, checker.DeepEquals, tt.want, check.Commentf(tt.name))
 	}
 }
@@ -1144,7 +1144,7 @@ func (ds *PolicyTestSuite) TestMapState_AccumulateMapChangesDeny(c *check.C) {
 			}
 			policyMaps.AccumulateMapChanges(cs, adds, deletes, x.port, x.proto, dir, x.redirect, x.deny, AuthTypeNone, nil)
 		}
-		adds, deletes := policyMaps.consumeMapChanges(policyMapState)
+		adds, deletes := policyMaps.consumeMapChanges(policyMapState, nil)
 		c.Assert(policyMapState, checker.DeepEquals, tt.state, check.Commentf(tt.name+" (MapState)"))
 		c.Assert(adds, checker.DeepEquals, tt.adds, check.Commentf(tt.name+" (adds)"))
 		c.Assert(deletes, checker.DeepEquals, tt.deletes, check.Commentf(tt.name+" (deletes)"))
@@ -1382,7 +1382,7 @@ func (ds *PolicyTestSuite) TestMapState_AccumulateMapChanges(c *check.C) {
 			}
 			policyMaps.AccumulateMapChanges(cs, adds, deletes, x.port, x.proto, dir, x.redirect, x.deny, x.authType, nil)
 		}
-		adds, deletes := policyMaps.consumeMapChanges(policyMapState)
+		adds, deletes := policyMaps.consumeMapChanges(policyMapState, nil)
 		c.Assert(policyMapState, checker.DeepEquals, tt.state, check.Commentf(tt.name+" (MapState)"))
 		c.Assert(adds, checker.DeepEquals, tt.adds, check.Commentf(tt.name+" (adds)"))
 		c.Assert(deletes, checker.DeepEquals, tt.deletes, check.Commentf(tt.name+" (deletes)"))
@@ -1940,7 +1940,7 @@ func (ds *PolicyTestSuite) TestMapState_AccumulateMapChangesOnVisibilityKeys(c *
 			}
 			policyMaps.AccumulateMapChanges(cs, adds, deletes, x.port, x.proto, dir, x.redirect, x.deny, AuthTypeNone, nil)
 		}
-		adds, deletes = policyMaps.consumeMapChanges(policyMapState)
+		adds, deletes = policyMaps.consumeMapChanges(policyMapState, nil)
 		// Visibilty redirects need to be re-applied after consumeMapChanges()
 		visOld = make(MapState)
 		for _, arg := range tt.visArgs {
