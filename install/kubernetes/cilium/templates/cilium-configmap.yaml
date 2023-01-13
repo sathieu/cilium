@@ -810,6 +810,10 @@ data:
   {{- end }}
   cluster-pool-ipv6-mask-size: {{ .Values.ipam.operator.clusterPoolIPv6MaskSize | quote }}
 {{- end }}
+{{- if (eq $ipam "cluster-pool-v2beta2") }}
+  cluster-pool-map: |
+{{ toYaml .Values.ipam.operator.clusterPoolMap | nindent 4 }}
+{{- end }}
 {{- end }}
 
 {{- if .Values.ipam.operator.externalAPILimitBurstSize }}
