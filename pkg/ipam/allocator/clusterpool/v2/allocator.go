@@ -122,6 +122,13 @@ func (a *Allocator) Init(ctx context.Context) error {
 			return fmt.Errorf("failed to parse pool spec for pool %s: %w", poolName, err)
 		}
 
+		log.WithFields(logrus.Fields{
+			"pool-name":     poolName,
+			"ipv4-cidrs":    pool.ipv4CIDRs,
+			"ipv4-masksize": pool.ipv4MaskSize,
+			"ipv6-cidrs":    pool.ipv6CIDRs,
+			"ipv6-masksize": pool.ipv6MaskSize,
+		}).Debug("adding pool")
 		if err := a.poolAlloc.AddPool(poolName, pool.ipv4CIDRs, pool.ipv4MaskSize, pool.ipv6CIDRs, pool.ipv6MaskSize); err != nil {
 			log.WithError(err).WithField("pool", pool).Debug("failed to add pool")
 			// TODO: multierr?
